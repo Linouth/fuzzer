@@ -37,6 +37,7 @@ pub fn main() !void {
     const allocator = arena.allocator();
 
     const args = try std.process.argsAlloc(std.heap.page_allocator);
+    std.debug.print("{s}\n", .{args});
     if (args.len < 2) {
         std.debug.print("Missing fuzzee.\n", .{});
         std.process.exit(1);
@@ -46,9 +47,12 @@ pub fn main() !void {
     std.debug.print("pid: {}\n", .{pid});
 
     if (pid == 0) {
+        std.debug.print("Execve {any}\n", .{args[1..]});
         try std.posix.ptrace(linux.PTRACE.TRACEME, pid, 0, 0);
 
-        const e = std.process.execve(allocator, &.{args[1]}, null);
+        // TODO: Replace this call to a direct execvpeZ call (heap allocations)
+        const e = std.process.execve(allocator, args[1..], null);
+        //const e = std.posix.execvpeZ(args[1], &.{args[1..], null}, &.{null});
         std.debug.panic("Execve err: {s}\n", .{ @errorName(e) });
     }
 
@@ -90,28 +94,19 @@ pub fn main() !void {
         const ret = std.posix.waitpid(-1, 0);
         const status = WaitStatus.parse(ret.status);
 
-        std.debug.print("{?}\n", .{status});
         switch (status) {
-            .Stopped => syscall_state = if (syscall_state == .entry) .exit else .entry,
-            else => {},
+            .Exited => break,
+            .Stopped => |sig| switch (sig) {
+                // First trap is due to execve
+                linux.SIG.TRAP =>
+                    syscall_state = if (syscall_state == .entry) .exit else .entry,
+                linux.SIG.SEGV => break,
+                linux.SIG.CHLD => break,
+                // linux.SIG.ABRT => break,
+                else => std.debug.print("Unhandled SIG: {}\n", .{sig}),
+            },
+            else => std.debug.print("{?}\n", .{status}),
         }
-
-        // if (linux.W.IFSIGNALED(ret.status)) {
-        //     const status = linux.W.TERMSIG(ret.status);
-        //     std.debug.print("Signaled, status: {}\n", .{status});
-        // } else if (linux.W.IFSTOPPED(ret.status)) {
-        //     syscall_state = if (syscall_state == .entry) .exit else .entry;
-        //     //const sig = linux.W.STOPSIG(ret.status);
-        //     //std.debug.print("Stopped, sig: {} {}\n", .{sig, timer.read() - t0});
-        // } else if (linux.W.IFEXITED(ret.status)) {
-        //     const status = linux.W.EXITSTATUS(ret.status);
-        //     std.debug.print("Exited, status: {}\n", .{status});
-        //     break;
-        // }
-        // else {
-        //     std.debug.print("Unknown signal\n", .{});
-        // }
-
         //std.debug.print("Waitpid returned, pid: {}, status: {}\n", .{ret.pid, ret.status});
 
         try std.posix.ptrace(linux.PTRACE.GETREGS, ret.pid, 0, @intFromPtr(&regs));
